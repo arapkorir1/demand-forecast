@@ -1,0 +1,154 @@
+
+# ============================================================
+# MASTER CONFIGURATION - Single Source of Truth
+# ============================================================
+
+project:
+  name: "demand-forecast"
+  version: "1.0.0"
+  environment: "development"  # development | staging | production
+
+# ============================================================
+# DATA PATHS
+# ============================================================
+data:
+  raw_path: "data/raw/"
+  interim_path: "data/interim/"
+  processed_path: "data/processed/"
+  
+  # Dataset configuration
+  dataset:
+    name: "m5_forecasting"
+    train_file: "sales_train_evaluation.csv"
+    calendar_file: "calendar.csv"
+    prices_file: "sell_prices.csv"
+    sample_submission: "sample_submission.csv"
+
+# ============================================================
+# FEATURE ENGINEERING
+# ============================================================
+features:
+  # Time-based features
+  calendar:
+    - "day_of_week"
+    - "month"
+    - "quarter"
+    - "year"
+    - "is_weekend"
+    - "is_holiday"
+    - "day_sin"      # Cyclical encoding
+    - "day_cos"
+    - "month_sin"
+    - "month_cos"
+  
+  # Lag features (how many days back to look)
+  lags:
+    - 1
+    - 2
+    - 3
+    - 7
+    - 14
+    - 28
+  
+  # Rolling statistics (window sizes in days)
+  rolling_windows:
+    - 7
+    - 14
+    - 28
+  
+  rolling_aggregations:
+    - "mean"
+    - "std"
+    - "min"
+    - "max"
+  
+  # Price features
+  price_features:
+    - "sell_price"
+    - "price_change"     # % change from previous day
+    - "price_rank"       # Within product category
+
+# ============================================================
+# TRAINING CONFIGURATION
+# ============================================================
+training:
+  # Walk-forward validation
+  validation:
+    n_splits: 5                    # Number of expanding window splits
+    test_size: 28                  # Predict 28 days into future
+    gap: 0                         # Gap between train and test (0 = no gap)
+  
+  # LightGBM hyperparameters
+  lgbm:
+    objective: "regression"
+    metric: "rmse"
+    boosting_type: "gbdt"
+    num_leaves: 31
+    max_depth: -1
+    learning_rate: 0.05
+    n_estimators: 1000
+    early_stopping_rounds: 50
+    feature_fraction: 0.8
+    bagging_fraction: 0.8
+    bagging_freq: 5
+    min_child_samples: 20
+    num_threads: 4
+    random_state: 42
+  
+  # Fallback SARIMA (for products with limited history)
+  sarima:
+    min_history_days: 30
+    order: [1, 1, 1]
+    seasonal_order: [1, 1, 1, 7]  # Weekly seasonality
+
+# ============================================================
+# EVALUATION
+# ============================================================
+evaluation:
+  metrics:
+    - "rmse"
+    - "mae"
+    - "mape"
+    - "wape"          # Weighted Absolute Percentage Error
+    - "smape"         # Symmetric MAPE
+  
+  # Hierarchical reconciliation
+  reconciliation:
+    enabled: true
+    method: "mint_shrinkage"  # mint_shrinkage | top_down | bottom_up
+    hierarchy_levels:
+      - "global"
+      - "state"
+      - "store"
+      - "department"
+      - "sku"
+
+# ============================================================
+# API (REST) CONFIGURATION
+# ============================================================
+api:
+  host: "0.0.0.0"
+  port: 8000
+  reload: true                     # Hot reload for development
+  max_cache_size: 1000             # Number of historical rows to cache
+  response_timeout_seconds: 0.2    # 200ms SLA
+
+# ============================================================
+# MLflow Tracking
+# ============================================================
+mlflow:
+  tracking_uri: "models/mlflow/"
+  experiment_name: "demand_forecast"
+  log_params: true
+  log_metrics: true
+  log_models: true
+
+# ============================================================
+# Prefect Orchestration
+# ============================================================
+orchestration:
+  schedule: "0 2 * * *"           # Run daily at 2 AM
+  retry_attempts: 3
+  retry_delay_seconds: 60
+  notification_email: "ds-team@company.com"
+
