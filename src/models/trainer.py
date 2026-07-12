@@ -11,7 +11,7 @@ from typing import Dict, Optional, Tuple, List, Any
 from datetime import datetime
 import lightgbm as lgb
 from sklearn.metrics import mean_squared_error, mean_absolute_error
-from src.util.config_loader import get_config
+from src.util.config_loader import load_config
 from src.validation.splitter import WalkForwardValidator, ValidationSplit
 
 logging.basicConfig(level=logging.INFO)
@@ -43,7 +43,7 @@ class ModelTrainer:
             test_size: Number of days to predict (from config if not provided)
         """
         # Load config
-        config = get_config()
+        config = load_config()
         lgbm_config = config['training']['lgbm']
         val_config = config['training']['validation']
         
@@ -60,7 +60,7 @@ class ModelTrainer:
             'bagging_fraction': lgbm_config.get('bagging_fraction', 0.8),
             'bagging_freq': lgbm_config.get('bagging_freq', 5),
             'min_child_samples': lgbm_config.get('min_child_samples', 20),
-            'num_threads': get_config('hardware.cpu_cores', 4),
+            'num_threads': config.get('hardware', {}).get('cpu_cores', 4),
             'random_state': lgbm_config.get('random_state', 42),
             'verbose': -1,
         }
@@ -143,7 +143,7 @@ class ModelTrainer:
         split_id: int,
     ) -> Dict[str, Any]:
         """
-        Train a single model on one split.
+        Train a single model on one split. Handles empty test windows gracefully.
         
         Returns:
             Dict with model, predictions, metrics, feature_importance
@@ -159,31 +159,34 @@ class ModelTrainer:
             categorical_feature='auto'  # Auto-detect categorical columns
         )
         
-        # Train with early stopping
+        # Train
         model = lgb.train(
             self.model_params,
             train_data,
             valid_sets=[train_data],
             callbacks=[
-                lgb.early_stopping(self.early_stopping_rounds),
+                lgb.early_stopping(self.early_stopping_rounds, verbose=False),
                 lgb.log_evaluation(0),  # Silent
             ]
         )
         
-        # Predict
+        # Predict train
         y_pred_train = model.predict(X_train)
-        y_pred_test = model.predict(X_test)
-        
-        # Calculate metrics
         train_rmse = np.sqrt(mean_squared_error(y_train, y_pred_train))
-        test_rmse = np.sqrt(mean_squared_error(y_test, y_pred_test))
         train_mae = mean_absolute_error(y_train, y_pred_train)
-        test_mae = mean_absolute_error(y_test, y_pred_test)
+        train_wape = np.sum(np.abs(y_train - y_pred_train)) / np.sum(y_train) * 100 if np.sum(y_train) > 0 else 0
         
-        # Calculate WAPE (Weighted Absolute Percentage Error) - business metric
-        train_wape = np.sum(np.abs(y_train - y_pred_train)) / np.sum(y_train) * 100
-        test_wape = np.sum(np.abs(y_test - y_pred_test)) / np.sum(y_test) * 100
-        
+        # Handle empty or zero row validation splits defensively
+        if len(X_test) == 0:
+            logger.warning(f"⚠️ Split {split_id} has an empty test set! Skipping validation metrics for this split.")
+            y_pred_test = np.array([])
+            test_rmse, test_mae, test_wape = np.nan, np.nan, np.nan
+        else:
+            y_pred_test = model.predict(X_test)
+            test_rmse = np.sqrt(mean_squared_error(y_test, y_pred_test))
+            test_mae = mean_absolute_error(y_test, y_pred_test)
+            test_wape = np.sum(np.abs(y_test - y_pred_test)) / np.sum(y_test) * 100 if np.sum(y_test) > 0 else 0
+            
         # Get feature importance
         feature_importance = pd.DataFrame({
             'feature': X_train.columns,
@@ -206,7 +209,6 @@ class ModelTrainer:
         logger.info(f"Split {split_id} results:")
         logger.info(f"  Train RMSE: {train_rmse:.4f} | Test RMSE: {test_rmse:.4f}")
         logger.info(f"  Train WAPE: {train_wape:.2f}% | Test WAPE: {test_wape:.2f}%")
-        logger.info(f"  Best iteration: {model.best_iteration}")
         
         return {
             'model': model,
@@ -272,10 +274,10 @@ class ModelTrainer:
             test_idx = split.test_indices
             
             # Split data
-            X_train = X.loc[train_idx]
-            X_test = X.loc[test_idx]
-            y_train = y.loc[train_idx]
-            y_test = y.loc[test_idx]
+            X_train = X.loc[X.index.intersection(train_idx)]
+            X_test = X.loc[X.index.intersection(test_idx)]
+            y_train = y.loc[y.index.intersection(train_idx)]
+            y_test = y.loc[y.index.intersection(test_idx)]
             
             # Train
             split_result = self.train_split(
@@ -307,10 +309,8 @@ class ModelTrainer:
         logger.info("\n" + "=" * 60)
         logger.info("TRAINING COMPLETE")
         logger.info("=" * 60)
-        logger.info(f"Average Test RMSE: {metrics_df['test_rmse'].mean():.4f} (±{metrics_df['test_rmse'].std():.4f})")
-        logger.info(f"Average Test WAPE: {metrics_df['test_wape'].mean():.2f}% (±{metrics_df['test_wape'].std():.2f}%)")
-        logger.info(f"Best Split Test RMSE: {metrics_df['test_rmse'].min():.4f}")
-        logger.info(f"Worst Split Test RMSE: {metrics_df['test_rmse'].max():.4f}")
+        logger.info(f"Average Test RMSE: {metrics_df['test_rmse'].nanmean() if hasattr(metrics_df['test_rmse'], 'nanmean') else metrics_df['test_rmse'].mean(skipna=True):.4f}")
+        logger.info(f"Average Test WAPE: {metrics_df['test_wape'].mean(skipna=True):.2f}%")
         
         results['metrics_df'] = metrics_df
         
@@ -340,11 +340,8 @@ class ModelTrainer:
         # Save summary
         summary = {
             'n_splits': len(results['models']),
-            'avg_test_rmse': metrics_df['test_rmse'].mean(),
-            'std_test_rmse': metrics_df['test_rmse'].std(),
-            'avg_test_wape': metrics_df['test_wape'].mean(),
-            'std_test_wape': metrics_df['test_wape'].std(),
-            'best_split_rmse': metrics_df['test_rmse'].min(),
+            'avg_test_rmse': float(metrics_df['test_rmse'].mean(skipna=True)),
+            'avg_test_wape': float(metrics_df['test_wape'].mean(skipna=True)),
             'feature_cols': results['feature_cols'],
             'model_params': self.model_params,
             'timestamp': datetime.now().isoformat(),

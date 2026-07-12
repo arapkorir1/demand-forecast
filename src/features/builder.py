@@ -76,7 +76,7 @@ class FeatureBuilder:
         logger.info(f"Adding lag features: {self.config['lags']}")
         
         # Group by unique ID (item-store combination)
-        grouped = self.df.groupby('id')
+        grouped = self.df.groupby('id', observed=False)
         
         for lag in self.config['lags']:
             col_name = f'sales_lag_{lag}'
@@ -88,7 +88,7 @@ class FeatureBuilder:
         """Add rolling statistics (mean, std, min, max)."""
         logger.info(f"Adding rolling features: {self.config['rolling_windows']}")
         
-        grouped = self.df.groupby('id')
+        grouped = self.df.groupby('id', observed=False)
         
         for window in self.config['rolling_windows']:
             # Rolling mean
@@ -126,12 +126,12 @@ class FeatureBuilder:
             return
         
         # Price change vs previous day
-        grouped = self.df.groupby('id')
-        self.df['price_change'] = grouped['sell_price'].pct_change()
+        grouped = self.df.groupby('id', observed=False)
+        self.df['price_change'] = grouped['sell_price'].pct_change(fill_method=None)
         self.df['price_change'] = self.df['price_change'].fillna(0)
         
         # Price relative to item average (optional)
-        item_avg_price = self.df.groupby('item_id')['sell_price'].transform('mean')
+        item_avg_price = self.df.groupby('item_id', observed=False)['sell_price'].transform('mean')
         self.df['price_relative_to_item'] = self.df['sell_price'] / item_avg_price
         
         logger.info("Price features added.")
