@@ -1,0 +1,14 @@
+name: demand-forecast-pipeline
+version: 1.0.0
+flow_name: demand-forecast-pipeline
+description: Production demand forecasting retraining
+schedule:
+  cron: "0 2 * * *"
+  timezone: "UTC"
+work_pool:
+  name: "default"
+  work_queue_name: "default"
+parameters: {}
+storage:
+  type: "local"
+  directory: "/app"
